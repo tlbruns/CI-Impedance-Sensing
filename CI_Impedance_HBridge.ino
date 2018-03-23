@@ -76,12 +76,7 @@ void setStateCurrentNegative() {
 }
 
 void setStateShorted() {
-  // Short load through P1/P2
-//  digitalWriteFast(SWN1, LOW); // ensure off
-//  digitalWriteFast(SWN2, LOW);
-//  digitalWriteFast(SWP1, HIGH);
-//  digitalWriteFast(SWP2, HIGH);
-
+  // Short load through N1/N2
   digitalWriteFast(SWN1, HIGH); // ensure off
   digitalWriteFast(SWN2, HIGH);
   digitalWriteFast(SWP1, LOW);
@@ -168,15 +163,6 @@ void loop() {
     Serial.print("\n\nrunFlag = ");
     Serial.println(runFlag);
   }
-
-//  if(buttonFlag) { // increment timerCount manually with button
-//    buttonFlag = false;
-//    timerFlag = true;
-//    digitalWriteFast(LED_BUILTIN, runFlag);
-//    delay(300);
-//    Serial.print("\ntimerCount = ");
-//    Serial.println(timerCount + 1);
-//  }
 
   if(runFlag) {
     // timerFlag is set every pulseTime [us], triggering state machine to step forward
