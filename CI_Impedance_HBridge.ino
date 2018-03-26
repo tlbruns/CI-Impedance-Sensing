@@ -1,7 +1,13 @@
 #include <ADC.h>
 #include <IntervalTimer.h>
+#include <array>
+#include <numeric>
 
 ADC *adc = new ADC();
+
+std::array<std::array<volatile int16_t, 64>, 16> buffer;
+volatile size_t write_pos = 0;
+volatile uint16_t adc_val = 0;
 int adcCount = 0;
 int adcSum = 0;
 bool adcFlag = false;
@@ -18,11 +24,11 @@ const int pulseTime = 35; // [us] time for each current pulse (+/-); total time 
 const int interPulseDelay = 20; // multiples of pulseTime between pulses ([us] = pulseTime * interPulseDelay)
 
 IntervalTimer timerPulse;
-bool timerFlag = false;
+volatile bool timerFlag = false;
 int timerCount = 0;
-bool runFlag = false;
+volatile bool runFlag = false;
 
-bool buttonFlag = false;
+volatile bool buttonFlag = false;
 const int buttonPin = 3; // momentary tactile button
 
 char cmd = 0;
@@ -89,6 +95,14 @@ double computeAvgVoltage(int sum, int count){
   return volt;
 }
 
+void adc0_isr() {
+  
+}
+
+void pdb_isr(void) {
+  
+}
+
 //********************************************************************
 // SETUP
 //********************************************************************
@@ -102,14 +116,16 @@ void setup() {
   pinMode(SWN2, OUTPUT);
   setStateOff(); // sets all to LOW
 
+  // set up ADC
   pinMode(A10, INPUT); // Diff Channel 0 +
   pinMode(A11, INPUT); // Diff Channel 0 -
-  adc->setAveraging(8); // average 4 samples for each measurement
+  adc->setAveraging(1); // average 4 samples for each measurement
   adc->setResolution(16); // 16 bit resolution
   adc->setSamplingSpeed(ADC_SAMPLING_SPEED::MED_SPEED); // HIGH_SPEED adds +6 ADCK; MED_SPEED adds +10 ADCK
   adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS); // sets ADCK to highest speed within spec for all resolutions
   adc2Voltage = 3.3/adc->getPGA()/adc->getMaxValue(); // conversion factor for adc values
-  
+  adc->enableInterrupts(ADC_0);
+    
   Serial.begin(115200);
   Serial.println("Type 'a' or press button to begin");
 
