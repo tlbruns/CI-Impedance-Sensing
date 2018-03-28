@@ -5,6 +5,10 @@
 
 using namespace Eigen;
 
+#define RESTART_ADDR       0xE000ED0C
+#define READ_RESTART()     (*(volatile uint32_t *)RESTART_ADDR)
+#define WRITE_RESTART(val) ((*(volatile uint32_t *)RESTART_ADDR) = (val))
+
 const int debugPin = 14;
 
 const int SWP1 = 17;
@@ -12,37 +16,43 @@ const int SWN1 = 8;
 const int SWP2 = 16;
 const int SWN2 = 9;
 
-const int pulseTime = 75; // [us] time for each current pulse (+/-); total time for biphasic pulse is 2*pulseTime
+long int loopTime = 0;
+
+const int pulseTime = 50; // [us] time for each current pulse (+/-); total time for biphasic pulse is 2*pulseTime
 const int interPulseDelay = 4; // multiples of pulseTime between pulses ([us] = pulseTime * interPulseDelay)
 IntervalTimer timerPulse;
 volatile bool timerFlag = false;
 volatile int timerCount = 0;
 
-const float adcTime = 5.0; // [us] time between each adc trigger
-const float adcFrequency = 1.0E6/adcTime; // [Hz] frequency used by pdb to trigger adc samples
-const int nSamples = 8; // number of ADC samples to take during positive pulse
-const int nPulses = 256; // number of pulse trains which will be sampled and averaged together for each single output measurement
+const float switchDelay = 4.0; // [us] time from setting output until current is stable
+
+const float adcTime = 3.5; // [us] time between each adc trigger
+const int adcDelay = 0; // [cycles] multiples of adcTime to wait before starting to sample
+IntervalTimer timerAdc; // timer for triggering ADC samples
+const int nSamples = 10; // number of ADC samples to take during positive pulse
+const int nPulses = 32; // number of pulse trains which will be sampled and averaged together for each single output measurement
 const float filterSigma = 2.5; // samples more than this many std deviations from the mean will be filtered out
 const float filterVariance = filterSigma * filterSigma; // variance is actually used since it is faster to compute 
-const int nSamplesShorted = 16; // number of samples to average for shorted voltage
+const int nSamplesShorted = 32; // number of samples to average for shorted voltage
+
+int adcVal = 0;
 
 ADC *adc = new ADC(); // ADC object
-float adcBufferShorted; // ADC buffer for samples when measuring shorted voltage
-float vShorted = 0.0; // voltage across load when shorted
+double adcBufferShorted; // ADC buffer for samples when measuring shorted voltage
+double vShorted = 0.0; // voltage across load when shorted
+//Matrix<int16_t, nSamples, nPulses> adcBuffer; // ADC buffer for storing raw (integer) values
 MatrixXi adcBuffer(nSamples, nPulses); // ADC buffer for storing raw (integer) values
 volatile int adcCount = 0; // current sample number (row index of adcBuffer)
 volatile int pulseCount = 0; // current pulse number (column index of adcBuffer)
 bool adcFlag = false;
 double adc2Voltage = 0.0;
 
-MatrixXf Alinfit(nSamples, 2); // linear regression matrix for line fitting
-float resistance = 0.0; // resistive component of measured impedance
-float capacitance = 0.0;// capacitive component of measured impedance
-
-volatile bool buttonFlag = false;
-const int buttonPin = 3; // momentary tactile button
+MatrixXd Alinfit(nSamples, 2); // linear regression matrix for line fitting
+double resistance = 0.0; // resistive component of measured impedance
+double capacitance = 0.0;// capacitive component of measured impedance
 
 volatile bool runFlag = false;
+const int buttonPin = 3; // momentary tactile button
 
 char cmd = 0;
 
@@ -78,16 +88,20 @@ fsmState PowerUp(void) {
   pinMode(A11, INPUT); // Diff Channel 0 -
   adc->setAveraging(1); // no averaging; take single samples
   adc->setResolution(16); // 16 bit resolution
-  adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED); // HIGH_SPEED adds +6 ADCK; MED_SPEED adds +10 ADCK
   adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS); // sets ADCK to highest speed within spec for all resolutions
-  adc->setReference(ADC_REFERENCE::REF_1V2, ADC_0); // change all 3.3 to 1.2 if you change the reference to 1V2
-  adc2Voltage = 1.2/adc->getPGA()/adc->getMaxValue(); // conversion factor for adc values
+  adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED); // HIGH_SPEED adds +6 ADCK; MED_SPEED adds +10 ADCK
+  adc->setReference(ADC_REFERENCE::REF_1V2, ADC_0); // use 1.2V internal reference
+//  adc->setReference(ADC_REFERENCE::REF_3V3, ADC_0); // use 1.2V internal reference
   adc->adc0->analogReadDifferential(A10,A11); // call once to setup
-  adc->enableInterrupts(ADC_0); // it's necessary to enable interrupts for PDB to work
+//  adc2Voltage = 1.2/adc->getPGA()/adc->getMaxValue(); // conversion factor for adc values
+//  adc2Voltage = 3.3/32768.0; // conversion factor for adc values
+  adc2Voltage = 1.2/32768.0; // conversion factor for adc values
+  adc->startContinuousDifferential(A10, A11, ADC_0);
 
   // set up linear regression matrix
-  Alinfit.col(0) = VectorXf::Ones(nSamples);
-  Alinfit.col(1) = VectorXf::LinSpaced(nSamples, 0, nSamples-1);
+  Alinfit.col(0) = VectorXd::Ones(nSamples);
+  Alinfit.col(1) = VectorXd::LinSpaced(nSamples, adcDelay, nSamples+adcDelay-1);
+  //print_mtxf(Alinfit);
 
   pinMode (debugPin, OUTPUT);
   pinMode(LED_BUILTIN, OUTPUT);
@@ -108,11 +122,9 @@ fsmState NotRunning(void) {
   // ensure outputs are shorted to zero voltage
   setOutputShorted();
 
-  // stop pdb
-  adc->adc0->stopPDB();
-
-  // stop IntervalTimer
+  // stop IntervalTimers
   timerPulse.end();
+  timerAdc.end();
 
   // reset counts
   pulseCount = 0;
@@ -130,13 +142,13 @@ fsmState NotRunning(void) {
   Serial.println(" us\n");
   Serial.println("\nType 's' or press button to start pulses");
 
-  while ((cmd != 's') && (!buttonFlag)) {
+  while ((cmd != 's') && (!runFlag)) {
     if (Serial.available() > 0) {
       cmd = Serial.read();
     }
   }
 
-  buttonFlag = false;
+  runFlag = true;
     
   Serial.println("\nStarting Pulses");
   
@@ -158,9 +170,9 @@ fsmState PulsePositive(void) {
   // reset adcCount
   adcCount = 0;
   
-  // begin IntervalTimer
+  // begin pulse IntervalTimer
   timerCount = 0;
-  timerPulse.begin(pulse_isr, pulseTime);
+  timerPulse.begin(timerPulse_isr, pulseTime);
 
   // wait for first pulse to sync up timing
   while (timerCount == 0);
@@ -168,8 +180,12 @@ fsmState PulsePositive(void) {
   // start positive pulse
   setOutputPositive();
 
-  // start pdb for triggering ADC
-  adc->adc0->startPDB(adcFrequency);
+  // wait specified time
+  delayMicroseconds(switchDelay + (adcDelay * adcTime));
+  
+  // start triggering ADC
+  timerAdc.begin(timerAdc_isr, adcTime);
+  
   
   return statePulseNegative;
 }
@@ -183,8 +199,9 @@ fsmState PulseNegative(void) {
   // wait for positive pulse to finish
   while (timerCount < 2);
 
-  // stop ADC
-  adc->adc0->stopPDB();
+  // ensure ADC triggering has been stopped
+  timerAdc.end();
+  //adc->stopContinuous();
   
   // start negative pulse
   setOutputNegative();
@@ -227,50 +244,61 @@ fsmState ComputeZ(void) {
 
   // reset pulse count
   pulseCount = 0;
+  
+  // average together samples taken at same time during pulses (i.e. rows of adcBuffer) and convert to voltage
+  VectorXd adcMean(nSamples);
+  adcMean = adc2Voltage * adcBuffer.rowwise().mean().cast<double>();
 
   // measure shorted voltage
-  adc->disableInterrupts(ADC_0);
   adcBufferShorted = 0.0;
   for (int ii=0; ii<nSamplesShorted; ii++){
-    adcBufferShorted += (adc2Voltage * adc->adc0->analogReadDifferential(A10,A11));
+    while(!adc->isComplete(ADC_0)); // wait for next conversion
+    adcBufferShorted += (adc2Voltage * adc->analogReadContinuous(ADC_0));
   }
-  vShorted = adcBufferShorted / (float)nSamplesShorted;
-  adc->enableInterrupts(ADC_0);
-  
+  vShorted = adcBufferShorted / (double)nSamplesShorted;
   Serial.print("Vshorted = ");
   Serial.println(vShorted, 7);
   
-  // average together samples taken at same time during pulses (i.e. rows of adcBuffer) and convert to voltage
-  VectorXf adcMean(nSamples);
-  adcMean = adc2Voltage * adcBuffer.rowwise().mean().cast<float>();
-
+  // subtract shorted voltage
+  adcMean = adcMean - (VectorXd::Ones(nSamples)*vShorted);
+  
   // fit least-squares line to data
-  Vector2f fit;
-  fit = Alinfit.householderQr().solve(adcMean);
-
+  Vector2d fit;
+  long int startTime = micros();
+//  fit = Alinfit.householderQr().solve(adcMean);
+  fit = Alinfit.colPivHouseholderQr().solve(adcMean);
+  long int totalTime = micros() - startTime;
+  
   // compute resistive component (via intercept of fit)
   // I = 100E-6 [A] ==> 1/I = 1E4 [A]
-//  resistance = fit(0) * 1.0E4;
-  resistance = adcMean(0) * 1.0E4;
+  resistance = fit(0) * 1.0E4;
   
   // compute capacitive component (via slope of fit)
   // C[nF] = (0.1[ma] * adcTime[us/sample]) / (slope[V/sample])
-  capacitance = 0.1 * adcTime / fit(1);
+  capacitance = 0.1 * (double)adcTime / fit(1);
 
+  long int totalLoopTime = micros() - loopTime;
+  
   // print results
-  Serial.print("\nV = ");
-//  Serial.print(resistance);
-  Serial.print(adcMean(0), 6);
-  Serial.print(" V,  C = ");
-//  Serial.print(" ohms,  C = ");
-//  Serial.print(capacitance);
-  Serial.print(fit(1));
+  Serial.print("Linear Fit Computation Time = ");
+  Serial.print(totalTime);
+  Serial.println(" us");
+  Serial.print("Loop Time = ");
+  Serial.print(totalLoopTime);
+  Serial.println(" us");
+  Serial.print("\nR = ");
+  Serial.print(resistance);
+  Serial.print(" ohms,  C = ");
+  Serial.print(capacitance);
   Serial.println(" nF");
+  Serial.println(fit(1), 7);
 
 //  MatrixXf adcV(nSamples, nPulses);
 //  adcV = adc2Voltage * adcBuffer.cast<float>();
-  print_mtxf(adcBuffer);
+print_mtxf(adcMean.cast<float>());
 //  delay(1000);
+
+  loopTime = micros();
   
   // begin next pulse train
   return statePulsePositive;
@@ -316,9 +344,24 @@ fsmState stepStateMachine(fsmState stateNext)
 //**** Interrupt Service Routines ****
 //************************************
 
-void pulse_isr() { // IntervalTimer
+void timerPulse_isr() { // IntervalTimer
   // increment counter
   timerCount++;
+}
+
+void timerAdc_isr() {
+  digitalWriteFast(debugPin, HIGH);
+  
+  if(adcCount < nSamples) {
+    while(!adc->isComplete(ADC_0)); // wait for next conversion
+    adcBuffer(adcCount, pulseCount) = adc->analogReadContinuous(ADC_0);
+    adcCount++; // increment count
+  }
+  else{
+    timerAdc.end();
+  }
+
+  digitalWriteFast(debugPin, LOW);
 }
 
 void button_isr() {
@@ -327,45 +370,14 @@ void button_isr() {
   
   // If interrupts come faster than N ms, assume it's a bounce and ignore
   if (currentTime - debounceTime > 250) {
-    buttonFlag = true;
+    runFlag = !runFlag;
+
+    if (!runFlag) {
+      WRITE_RESTART(0x5FA0004);
+    }
   }
   
   debounceTime = currentTime;
-}
-
-void adc0_isr() {
-  if(adc->adc0->fail_flag) {
-    adc->adc0->stopPDB();
-    Serial.print("ADC0 error flags: 0x");
-    Serial.println(adc->adc0->fail_flag, HEX);
-    if(adc->adc0->fail_flag == ADC_ERROR_COMPARISON) {
-      adc->adc0->fail_flag &= ~ADC_ERROR_COMPARISON; // clear that error
-      Serial.println("Comparison error in ADC0");
-    }
-    while(1){
-      digitalWriteFast(LED_BUILTIN, HIGH);
-      delay(500);
-      digitalWriteFast(LED_BUILTIN, LOW);
-      delay(500);
-    }
-  }
-  
-  if(adcCount < nSamples) {
-    // reads value and clears interrupt
-    adcBuffer(adcCount, pulseCount) = adc->adc0->readSingle();
-    adcCount++; // increment count
-  }
-  else{
-    adc->adc0->stopPDB(); // stop pdb once desired number of samples have been taken
-    adc->adc0->readSingle(); // throw away sample and clear interrupt
-  }
-
-  digitalWriteFast(debugPin, LOW);
-}
-
-void pdb_isr(void) { // triggers ADC sample
-  PDB0_SC &=~PDB_SC_PDBIF; // clear interrupt
-  digitalWriteFast(debugPin, HIGH);
 }
 
 //************************************
@@ -445,15 +457,4 @@ void setup() {
 void loop() {
   // run state machine
   stateNext = stepStateMachine(stateNext);
-  
-//  if(buttonFlag) {
-//    buttonFlag = false;
-//    timerFlag = false;
-//    timerCount = 0;
-//    runFlag = !runFlag;
-//    digitalWriteFast(LED_BUILTIN, runFlag);
-//    delay(300);
-//    Serial.print("\n\nrunFlag = ");
-//    Serial.println(runFlag);
-//  }
 }
