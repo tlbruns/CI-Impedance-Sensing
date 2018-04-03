@@ -16,9 +16,11 @@ const int SWN1 = 8;
 const int SWP2 = 16;
 const int SWN2 = 9;
 
+const int FETdelay = 5; // [us] time to wait for MOSFET to fully turn on/off
+
 long int loopTime = 0;
 
-const int pulseTime = 50; // [us] time for each current pulse (+/-); total time for biphasic pulse is 2*pulseTime
+const int pulseTime = 75; // [us] time for each current pulse (+/-); total time for biphasic pulse is 2*pulseTime
 const int interPulseDelay = 4; // multiples of pulseTime between pulses ([us] = pulseTime * interPulseDelay)
 IntervalTimer timerPulse;
 volatile bool timerFlag = false;
@@ -27,10 +29,10 @@ volatile int timerCount = 0;
 const float switchDelay = 4.0; // [us] time from setting output until current is stable
 
 const float adcTime = 3.5; // [us] time between each adc trigger
-const int adcDelay = 0; // [cycles] multiples of adcTime to wait before starting to sample
+const int adcDelay = 2; // [cycles] multiples of adcTime to wait before starting to sample
 IntervalTimer timerAdc; // timer for triggering ADC samples
-const int nSamples = 10; // number of ADC samples to take during positive pulse
-const int nPulses = 32; // number of pulse trains which will be sampled and averaged together for each single output measurement
+const int nSamples = 12; // number of ADC samples to take during positive pulse
+const int nPulses = 16; // number of pulse trains which will be sampled and averaged together for each single output measurement
 const float filterSigma = 2.5; // samples more than this many std deviations from the mean will be filtered out
 const float filterVariance = filterSigma * filterSigma; // variance is actually used since it is faster to compute 
 const int nSamplesShorted = 32; // number of samples to average for shorted voltage
@@ -87,15 +89,15 @@ fsmState PowerUp(void) {
   pinMode(A10, INPUT); // Diff Channel 0 +
   pinMode(A11, INPUT); // Diff Channel 0 -
   adc->setAveraging(1); // no averaging; take single samples
-  adc->setResolution(16); // 16 bit resolution
+  adc->setResolution(13); // 16 bit resolution
   adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS); // sets ADCK to highest speed within spec for all resolutions
-  adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED); // HIGH_SPEED adds +6 ADCK; MED_SPEED adds +10 ADCK
-  adc->setReference(ADC_REFERENCE::REF_1V2, ADC_0); // use 1.2V internal reference
-//  adc->setReference(ADC_REFERENCE::REF_3V3, ADC_0); // use 1.2V internal reference
+  adc->setSamplingSpeed(ADC_SAMPLING_SPEED::MED_SPEED); // HIGH_SPEED adds +6 ADCK; MED_SPEED adds +10 ADCK
+//  adc->setReference(ADC_REFERENCE::REF_1V2, ADC_0); // use 1.2V internal reference
+  adc->setReference(ADC_REFERENCE::REF_3V3, ADC_0); // use 1.2V internal reference
   adc->adc0->analogReadDifferential(A10,A11); // call once to setup
-//  adc2Voltage = 1.2/adc->getPGA()/adc->getMaxValue(); // conversion factor for adc values
+  adc2Voltage = 3.3/adc->getPGA()/adc->getMaxValue(); // conversion factor for adc values
 //  adc2Voltage = 3.3/32768.0; // conversion factor for adc values
-  adc2Voltage = 1.2/32768.0; // conversion factor for adc values
+//  adc2Voltage = 1.2/32768.0; // conversion factor for adc values
   adc->startContinuousDifferential(A10, A11, ADC_0);
 
   // set up linear regression matrix
@@ -201,7 +203,6 @@ fsmState PulseNegative(void) {
 
   // ensure ADC triggering has been stopped
   timerAdc.end();
-  //adc->stopContinuous();
   
   // start negative pulse
   setOutputNegative();
@@ -256,8 +257,9 @@ fsmState ComputeZ(void) {
     adcBufferShorted += (adc2Voltage * adc->analogReadContinuous(ADC_0));
   }
   vShorted = adcBufferShorted / (double)nSamplesShorted;
-  Serial.print("Vshorted = ");
-  Serial.println(vShorted, 7);
+//  Serial.print("Vshorted = ");
+//  Serial.print(vShorted, 5);
+//  Serial.println(" V");
   
   // subtract shorted voltage
   adcMean = adcMean - (VectorXd::Ones(nSamples)*vShorted);
@@ -280,22 +282,39 @@ fsmState ComputeZ(void) {
   long int totalLoopTime = micros() - loopTime;
   
   // print results
-  Serial.print("Linear Fit Computation Time = ");
-  Serial.print(totalTime);
-  Serial.println(" us");
-  Serial.print("Loop Time = ");
-  Serial.print(totalLoopTime);
-  Serial.println(" us");
-  Serial.print("\nR = ");
+//  Serial.print("Linear Fit Computation Time = ");
+//  Serial.print(totalTime);
+//  Serial.println(" us");
+//  Serial.print("Loop Time = ");
+//  Serial.print(totalLoopTime);
+//  Serial.println(" us");
+//  Serial.print("R = ");
+//  Serial.print(resistance);
+//  Serial.print(" ohms,  C = ");
+//  if (capacitance > 500) {
+//    // too large to cause enough voltage rise over the pulse length
+//    Serial.println(" N/A");
+//  }
+//  else {
+//    Serial.print(capacitance);
+//    Serial.println(" nF");
+//  }
+
   Serial.print(resistance);
-  Serial.print(" ohms,  C = ");
-  Serial.print(capacitance);
-  Serial.println(" nF");
-  Serial.println(fit(1), 7);
+  Serial.print(",");
+  if ((capacitance > 500)||(capacitance<0)) {
+    // too large to cause enough voltage rise over the pulse length
+    Serial.println("0");
+  }
+  else {
+    Serial.println(capacitance);
+  }
+  
+//  Serial.println(fit(1), 7);
 
 //  MatrixXf adcV(nSamples, nPulses);
 //  adcV = adc2Voltage * adcBuffer.cast<float>();
-print_mtxf(adcMean.cast<float>());
+//print_mtxf(adcMean.cast<float>());
 //  delay(1000);
 
   loopTime = micros();
@@ -387,6 +406,7 @@ void setOutputOff() {
   // all gates LOW
   digitalWriteFast(SWP1, LOW);
   digitalWriteFast(SWP2, LOW);
+  delayMicroseconds(FETdelay);
   digitalWriteFast(SWN1, LOW);
   digitalWriteFast(SWN2, LOW);
 }
@@ -395,24 +415,29 @@ void setOutputPositive() {
   // Allow positive current from P1 to N1
   digitalWriteFast(SWN2, LOW); // ensure off
   digitalWriteFast(SWP2, LOW);
-  digitalWriteFast(SWN1, HIGH); // turn on N1 before P1
+  delayMicroseconds(FETdelay); // brief delay to ensure fully off
+  digitalWriteFast(SWN1, HIGH);
   digitalWriteFast(SWP1, HIGH);
 }
 
 void setOutputNegative() {
   // Allow positive current from P2 to N2
-  digitalWriteFast(SWN1, LOW); // ensure off
-  digitalWriteFast(SWP1, LOW);
+  digitalWriteFast(SWP1, LOW); // turn off P1 first to drain charge from REF200
+  delayMicroseconds(4);
+  digitalWriteFast(SWN1, LOW); 
+  delayMicroseconds(FETdelay); // brief delay to ensure fully off
   digitalWriteFast(SWN2, HIGH); // turn on N2 before P2
   digitalWriteFast(SWP2, HIGH);
 }
 
 void setOutputShorted() {
   // Short load through N1/N2
-  digitalWriteFast(SWN1, HIGH); // ensure off
-  digitalWriteFast(SWN2, HIGH);
   digitalWriteFast(SWP1, LOW);
   digitalWriteFast(SWP2, LOW);
+  delayMicroseconds(FETdelay);
+  digitalWriteFast(SWN1, HIGH);
+  digitalWriteFast(SWN2, HIGH);
+  
 }
 
 // PRINT MATRIX (float type)
@@ -425,9 +450,9 @@ void print_mtxf(const Eigen::MatrixXf& X)
    nrow = X.rows();
    ncol = X.cols();
 
-   Serial.print("nrow: "); Serial.println(nrow);
-   Serial.print("ncol: "); Serial.println(ncol);       
-   Serial.println();
+//   Serial.print("nrow: "); Serial.println(nrow);
+//   Serial.print("ncol: "); Serial.println(ncol);       
+//   Serial.println();
    
    for (i=0; i<nrow; i++)
    {
