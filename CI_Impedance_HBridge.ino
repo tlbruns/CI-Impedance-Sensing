@@ -23,16 +23,16 @@ const int FETdelay = 2; // [us] time to wait for MOSFET to fully turn on/off (pr
 long int loopTime = 0;
 
 IntervalTimer timerPulse;
-const int pulseTime = 80; // [us] time for each current pulse (+/-); total time for biphasic pulse is 2*pulseTime
+const int pulseTime = 100; // [us] time for each current pulse (+/-); total time for biphasic pulse is 2*pulseTime
 const int interPulseDelay = 1; // multiples of pulseTime between pulse trains ([us] = pulseTime * interPulseDelay)
 volatile bool timerFlag = false;
 volatile int timerCount = 0;
 
 IntervalTimer timerAdc; // timer for triggering ADC samples
-const float adcTime = 7.5; // [us] time between each adc trigger
+const float adcTime = 8.5; // [us] time between each adc trigger
 const int adcDelay = 0; // number of adc samples to discard before saving (while waiting to current pulse to stabalize)
-const int nSamples = 7; // number of ADC samples to take during positive pulse
-const int nPulses = 128; // number of pulse trains which will be sampled and averaged together for each single output measurement
+const int nSamples = 8; // number of ADC samples to take during positive pulse
+const int nPulses = 64; // number of pulse trains which will be sampled and averaged together for each single output measurement
 const float filterSigma = 2.5; // samples more than this many std deviations from the mean will be filtered out
 const float filterVariance = filterSigma * filterSigma; // variance is actually used since it is faster to compute 
 const int nSamplesShorted = 64; // number of samples to average for shorted voltage
@@ -85,14 +85,14 @@ fsmState PowerUp(void) {
   pinMode (debugPin, OUTPUT);
   pinMode (debug2Pin, OUTPUT);
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(buttonPin, INPUT);
-  attachInterrupt(buttonPin, button_isr, RISING);
+  pinMode(buttonPin, INPUT_PULLUP); // button is pulled high when open, grounded when pressed
+  attachInterrupt(buttonPin, button_isr, FALLING);
   
   // set up ADC
   pinMode(A10, INPUT); // Diff Channel 0 +
   pinMode(A11, INPUT); // Diff Channel 0 -
   adc->setAveraging(0); // no averaging; take single samples
-  adc->setResolution(16); // 13 bit resolution
+  adc->setResolution(16); // resolution
   adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS); // sets ADCK to highest speed within spec for all resolutions
   adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED); // HIGH_SPEED adds +6 ADCK; MED_SPEED adds +10 ADCK
 //  adc->setReference(ADC_REFERENCE::REF_1V2, ADC_0); // use 1.2V internal reference
@@ -210,9 +210,9 @@ fsmState PulseNegative(void) {
         timerAdc.end(); // halt triggering
       }
       else if (adcCount > adcDelay) {
-        digitalWriteFast(debug2Pin, HIGH);
+//        digitalWriteFast(debug2Pin, HIGH);
         adcRaw(adcCount-adcDelay-1, pulseCount) = adcLast; // store
-        digitalWriteFast(debug2Pin, LOW);
+//        digitalWriteFast(debug2Pin, LOW);
       }  
     }
   }
@@ -230,9 +230,9 @@ fsmState PulseNegative(void) {
 
   // ensure buffer is cleared
   while(!adcRingBuffer->isEmpty()) {
-    digitalWriteFast(debug2Pin, HIGH);
+//    digitalWriteFast(debug2Pin, HIGH);
     adcRingBuffer->read();
-    digitalWriteFast(debug2Pin, LOW);
+//    digitalWriteFast(debug2Pin, LOW);
   }
   
   // increment pulse count
@@ -287,24 +287,24 @@ fsmState ComputeZ(void) {
   VectorXd adcMean(nSamples);
   adcMean = adc2Voltage * adcRaw.rowwise().mean().cast<double>();
 
-  // measure shorted voltage
-  double adcBufferShorted = 0.0;
-  adcCount = 0;
-  timerAdc.begin(timerAdc_isr, adcTime);
-  while (adcCount < nSamplesShorted) 
-  {
-    if (!adcRingBuffer->isEmpty()) {
-      adcCount++;
-      adcBufferShorted += (adc2Voltage * adcRingBuffer->read());
-    }
-  }
-  vShorted = adcBufferShorted / (double)nSamplesShorted; // compute average
-//  Serial.print("Vshorted = ");
-//  Serial.print(vShorted, 5);
-//  Serial.println(" V");
-
-  // subtract shorted voltage
-  adcMean = adcMean - (VectorXd::Ones(nSamples)*vShorted);
+//  // measure shorted voltage
+//  double adcBufferShorted = 0.0;
+//  adcCount = 0;
+//  timerAdc.begin(timerAdc_isr, adcTime);
+//  while (adcCount < nSamplesShorted) 
+//  {
+//    if (!adcRingBuffer->isEmpty()) {
+//      adcCount++;
+//      adcBufferShorted += (adc2Voltage * adcRingBuffer->read());
+//    }
+//  }
+//  vShorted = adcBufferShorted / (double)nSamplesShorted; // compute average
+////  Serial.print("Vshorted = ");
+////  Serial.print(vShorted, 5);
+////  Serial.println(" V");
+//
+//  // subtract shorted voltage
+//  adcMean = adcMean - (VectorXd::Ones(nSamples)*vShorted);
   
   // stop ADC triggering and empty buffer
   timerAdc.end();
@@ -352,7 +352,6 @@ fsmState ComputeZ(void) {
 
 //  Serial.print(vShorted,6);
 //  Serial.print(",");
-
   Serial.print(resistance);
   Serial.print(",");
   if ((capacitance > 500)||(capacitance<0)) {
